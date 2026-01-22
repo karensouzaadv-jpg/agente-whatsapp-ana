@@ -1,331 +1,233 @@
 import express from "express";
+import fetch from "node-fetch";
 
 const app = express();
-app.use(express.json({ limit: "5mb" }));
-
-/**
- * =========================
- * VARIÁVEIS DE AMBIENTE (Render)
- * =========================
- * VERIFY_TOKEN=um_texto_qualquer
- * WHATSAPP_TOKEN=token_do_whatsapp_cloud_api
- * PHONE_NUMBER_ID=seu_phone_number_id (ex: 9718...)
- * OPENAI_API_KEY=sua_chave_openai
- *
- * NOTION_TOKEN=secret_xxx  (Notion integration token)
- * NOTION_DB_ID=xxxxxxxxxxxxxxxxxxxxxx (database id do CRM)
- */
+app.use(express.json());
 
 const {
-  VERIFY_TOKEN,
-  WHATSAPP_TOKEN,
-  PHONE_NUMBER_ID,
-  OPENAI_API_KEY,
-  NOTION_TOKEN,
-  NOTION_DB_ID,
-  PORT = 10000,
+VERIFY_TOKEN,
+WHATSAPP_TOKEN,
+PHONE_NUMBER_ID,
+PORT = 10000,
 } = process.env;
 
-// ✅ Regras do seu agente (coloque aqui e ajuste quando quiser)
-const SYSTEM_PROMPT = `
-Você é um advogado do escritório Karen Alves Advocacia e conversa pelo WhatsApp.
-Seu tom: formal, acolhedor, humano, objetivo e profissional.
-Você NÃO deve se apresentar como secretária, atendente, recepção ou “vou chamar um advogado”.
-Fale como advogado do escritório, sem inventar nome específico.
+/* ===============================
+SESSÕES EM MEMÓRIA
+================================ */
+const sessions = new Map();
 
-OBJETIVO:
-- Captar lead, qualificar e fazer triagem inicial.
-- Tirar dúvidas simples e orientar próximos passos.
-- Coletar informações essenciais e encaminhar para consulta/atendimento humano quando necessário.
-- Informar áreas atendidas e lista básica de documentos.
-- Pode solicitar envio de documentos (sem prometer análise completa pelo WhatsApp, diga que após a análise, ainda hoje entrará em contato por ligação).
+/* ===============================
+FUNÇÃO DE ESPERA
+================================ */
+const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-REGRAS PROIBIDAS (NUNCA FAÇA):
-- Não informar preços de honorários/“quanto custa o processo”.
-- Não prometer resultado, “causa ganha”, “você vai ganhar”, nem dar expectativa de ganhos.
-- Não dar orientação jurídica, nem estratégia detalhada, nem “petições”.
-- Não falar sobre processo específico como se tivesse acesso aos autos.
-- Não garantir prazos, decisões, ou afirmar que “o processo é ganho”.
-
-GATILHOS DE URGÊNCIA:
-Se o cliente falar “prisão”, “custódia”, “flagrante”, “audiência hoje”, “audiência”, “delegacia”, “mandado”, “urgente”:
-- Responda com máxima prioridade e peça local/cidade, horário, nome completo, e se há detido/onde.
-- pergunte se podemos ligar.
-- Sem prometer resultado.
-
-O QUE VOCÊ DEVE COLETAR NA TRIAGEM:
-- Nome do cliente
-- Cidade/UF
-- Área (Criminal, Cível, Trabalhista, Família, Previdenciário, etc.)
-- Resumo do problema (curto)
-- Se há urgência (sim/não) e qual
-
-RESPOSTA PADRÃO:
-- Use mensagens curtas, claras, sem juridiquês pesado.
-- Sempre finalize com UMA pergunta objetiva para avançar o atendimento.
-`;
-
-/**
- * =========================
- * 1) Verificação do Webhook (Meta)
- * =========================
- */
+/* ===============================
+VERIFICAÇÃO WEBHOOK
+================================ */
 app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
-  }
-  return res.sendStatus(403);
+const mode = req.query["hub.mode"];
+const token = req.query["hub.verify_token"];
+const challenge = req.query["hub.challenge"];
+if (mode === "subscribe" && token === VERIFY_TOKEN) {
+return res.status(200).send(challenge);
+}
+return res.sendStatus(403);
 });
 
-/**
- * =========================
- * 2) Receber mensagens (Meta -> seu webhook)
- * =========================
- */
+/* ===============================
+RECEBIMENTO DE MENSAGENS
+================================ */
 app.post("/webhook", async (req, res) => {
-  try {
-    // Sempre responda 200 rápido pra Meta não reenviar
-    res.sendStatus(200);
+res.sendStatus(200);
 
-    const incoming = extractIncomingMessage(req.body);
-    if (!incoming) return;
+const msg = extractMessage(req.body);
+if (!msg) return;
 
-    const { from, text } = incoming;
+const { from, text } = msg;
+const lower = text.toLowerCase();
+const session = sessions.get(from) || {};
 
-    // 2.1) Gerar resposta com OpenAI
-    const aiReply = await generateAIReply({
-      userText: text,
-      userPhone: from,
-    });
+/* ===== ABERTURA ===== */
+if (!session.step) {
+await send(from,
+"Olá. Agradecemos seu contato. Para iniciar seu atendimento, farei uma pergunta."
+);
+await send(from,
+"Para qual área você precisa de atendimento agora?\n\n" +
+"1️⃣ Criminal\n2️⃣ Família\n3️⃣ Cível\n4️⃣ Trabalhista\n5️⃣ Outro"
+);
+session.step = "area";
+sessions.set(from, session);
+return;
+}
 
-    // 2.2) Enviar resposta para WhatsApp
-    await sendWhatsAppText({ to: from, body: aiReply });
+/* ===== ÁREA ===== */
+if (session.step === "area") {
+session.area = normalizeArea(text);
+sessions.set(from, session);
 
-    // 2.3) Salvar no Notion (CRM)
-    await upsertLeadInNotion({
-      phone: from,
-      lastMessage: text,
-      lastReply: aiReply,
-    });
-  } catch (err) {
-    console.error("Erro no webhook:", err?.message || err);
-  }
+if (session.area === "Criminal") {
+await send(from,
+"Para eu te orientar da forma mais adequada, me diga: a prisão aconteceu HOJE ou a pessoa JÁ ESTAVA PRESA?"
+);
+session.step = "prison_status";
+return;
+}
+
+session.step = "has_lawyer";
+await send(from,
+"Antes de seguirmos, preciso confirmar uma informação para organizar corretamente o atendimento: este caso já possui advogado(a) constituído(a) atualmente?"
+);
+return;
+}
+
+/* ===== CRIMINAL: STATUS DA PRISÃO ===== */
+if (session.step === "prison_status") {
+if (lower.includes("hoje")) {
+session.prison = "HOJE";
+session.step = "custody";
+await send(from, "Essa pessoa já passou pela audiência de custódia?");
+sessions.set(from, session);
+return;
+}
+
+session.prison = "JA_ESTAVA_PRESA";
+session.step = "has_lawyer";
+await send(from,
+"Antes de seguirmos, preciso confirmar uma informação para organizar corretamente o atendimento: este caso já possui advogado(a) constituído(a) atualmente?"
+);
+sessions.set(from, session);
+return;
+}
+
+/* ===== CRIMINAL: CUSTÓDIA ===== */
+if (session.step === "custody") {
+if (lower.includes("não")) {
+session.step = "call_permission";
+await send(from,
+"Nesse caso, o tempo é decisivo. Posso te ligar agora?"
+);
+sessions.set(from, session);
+return;
+}
+
+session.step = "has_lawyer";
+await send(from,
+"Antes de seguirmos, preciso confirmar uma informação para organizar corretamente o atendimento: este caso já possui advogado(a) constituído(a) atualmente?"
+);
+sessions.set(from, session);
+return;
+}
+
+/* ===== PERMISSÃO PARA LIGAÇÃO ===== */
+if (session.step === "call_permission") {
+if (lower.includes("sim")) {
+await wait(30000);
+await send(from,
+"Tentei te ligar e a ligação não completou. Pode tentar me ligar aqui pelo WhatsApp agora?"
+);
+sessions.delete(from);
+return;
+}
+sessions.delete(from);
+return;
+}
+
+/* ===== JÁ POSSUI ADVOGADO ===== */
+if (session.step === "has_lawyer") {
+if (lower.includes("não")) {
+session.step = "lead_data";
+await send(from,
+"Para que eu possa seguir com a análise inicial, por gentileza me informe seu nome completo, a cidade/UF e um breve resumo do caso."
+);
+sessions.set(from, session);
+return;
+}
+
+session.step = "lawyer_switch";
+await send(from,
+"Certo. Você está buscando uma troca de advogado ou apenas uma orientação pontual?"
+);
+sessions.set(from, session);
+return;
+}
+
+/* ===== TROCA DE ADVOGADO ===== */
+if (session.step === "lawyer_switch") {
+if (lower.includes("troca")) {
+session.step = "process_data";
+await send(from,
+"Para avaliar a possibilidade de atuação, preciso analisar melhor o caso. " +
+"Informe seu nome completo, a cidade/UF e um breve resumo da situação atual.\n\n" +
+"Você possui o número do processo? Caso positivo, informe aqui. " +
+"Se não tiver, informe o CPF para consulta no Tribunal de Justiça."
+);
+sessions.set(from, session);
+return;
+}
+
+await send(from,
+"Para evitar qualquer conflito profissional, orientações paralelas não são realizadas quando já há advogado(a) constituído(a). " +
+"Recomendo que as tratativas sigam diretamente com o profissional responsável pelo caso."
+);
+sessions.delete(from);
+return;
+}
+
+/* ===== DADOS FINAIS ===== */
+if (session.step === "lead_data" || session.step === "process_data") {
+const hour = new Date().getHours();
+
+if (hour >= 8 && hour <= 19) {
+await send(from,
+"Estou finalizando um atendimento agora. Assim que concluir, retorno por ligação para conversarmos, tudo bem?"
+);
+} else {
+await send(from,
+"Estou em horário de plantão no momento. Caso a ligação não seja atendida imediatamente, sua mensagem ficará registrada e retornarei o contato assim que possível."
+);
+}
+
+sessions.delete(from);
+return;
+}
 });
 
-/**
- * =========================
- * Util: extrair mensagem do payload do WhatsApp
- * =========================
- */
-function extractIncomingMessage(body) {
-  const entry = body?.entry?.[0];
-  const changes = entry?.changes?.[0];
-  const value = changes?.value;
-
-  const message = value?.messages?.[0];
-  if (!message) return null;
-
-  const from = message.from; // telefone do cliente (ex: 5562...)
-  const text = message?.text?.body;
-
-  // Ignora coisas que não sejam texto (imagem, audio etc.) por enquanto
-  if (!from || !text) return null;
-
-  return { from, text };
+/* ===============================
+FUNÇÕES AUXILIARES
+================================ */
+function extractMessage(body) {
+const msg = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+if (!msg?.text?.body) return null;
+return { from: msg.from, text: msg.text.body.trim() };
 }
 
-/**
- * =========================
- * 3) OpenAI: gerar resposta com regras
- * =========================
- */
-async function generateAIReply({ userText, userPhone }) {
-  if (!OPENAI_API_KEY) {
-    return "No momento estamos com instabilidade técnica. Pode me dizer seu nome e sua cidade/UF para eu dar sequência?";
-  }
-
-  // Use um modelo compatível com chat/completions-style
-  // (Se você já usa Responses API, posso adaptar depois)
-  const payload = {
-    model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: `Telefone do cliente: ${userPhone}\nMensagem: ${userText}`,
-      },
-    ],
-    temperature: 0.4,
-  };
-
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!resp.ok) {
-    const t = await safeText(resp);
-    console.error("OpenAI erro:", resp.status, t);
-    return "Entendi. Para eu te orientar corretamente na triagem inicial, pode me dizer seu nome e sua cidade/UF?";
-  }
-
-  const data = await resp.json();
-  const content = data?.choices?.[0]?.message?.content?.trim();
-
-  // fallback
-  return (
-    content ||
-    "Entendi. Pode me dizer seu nome e sua cidade/UF para eu seguir com a triagem inicial?"
-  );
+function normalizeArea(text) {
+return {
+"1": "Criminal",
+"2": "Família",
+"3": "Cível",
+"4": "Trabalhista",
+"5": "Outro",
+}[text.trim()] || "Outro";
 }
 
-async function safeText(resp) {
-  try {
-    return await resp.text();
-  } catch {
-    return "";
-  }
-}
-
-/**
- * =========================
- * 4) WhatsApp Cloud API: enviar texto
- * =========================
- */
-async function sendWhatsAppText({ to, body }) {
-  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
-    console.error("Faltando WHATSAPP_TOKEN ou PHONE_NUMBER_ID");
-    return;
-  }
-
-  const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
-
-  const payload = {
-    messaging_product: "whatsapp",
-    to,
-    type: "text",
-    text: { body },
-  };
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const data = await resp.json();
-  if (!resp.ok) {
-    console.error("Erro ao enviar WhatsApp:", resp.status, data);
-  }
-}
-
-/**
- * =========================
- * 5) Notion CRM: salvar lead (simples)
- * =========================
- * Pré-requisito: seu Notion DB precisa ter estas propriedades:
- * - Nome do Cliente (title)
- * - Telefone (rich_text ou phone)
- * - Área (select)  [opcional]
- * - Última Mensagem (rich_text)
- * - Última Resposta (rich_text)
- * - Status (select) ex: Novo / Em atendimento / Encerrado
- */
-async function upsertLeadInNotion({ phone, lastMessage, lastReply }) {
-  if (!NOTION_TOKEN || !NOTION_DB_ID) {
-    // Se você ainda não configurou Notion, não quebra o fluxo
-    return;
-  }
-
-  // 5.1) Tentar encontrar lead existente pelo telefone
-  const existing = await notionFindByPhone(phone);
-
-  if (existing?.id) {
-    await notionUpdate(existing.id, { phone, lastMessage, lastReply });
-  } else {
-    await notionCreate({ phone, lastMessage, lastReply });
-  }
-}
-
-async function notionFindByPhone(phone) {
-  const resp = await fetch(`https://api.notion.com/v1/databases/${NOTION_DB_ID}/query`, {
-    method: "POST",
-    headers: notionHeaders(),
-    body: JSON.stringify({
-      filter: {
-        property: "Telefone",
-        rich_text: { equals: phone },
-      },
-      page_size: 1,
-    }),
-  });
-
-  const data = await resp.json();
-  if (!resp.ok) {
-    console.error("Notion query erro:", resp.status, data);
-    return null;
-  }
-
-  return data?.results?.[0] || null;
-}
-
-async function notionCreate({ phone, lastMessage, lastReply }) {
-  const resp = await fetch("https://api.notion.com/v1/pages", {
-    method: "POST",
-    headers: notionHeaders(),
-    body: JSON.stringify({
-      parent: { database_id: NOTION_DB_ID },
-      properties: {
-        "Nome do Cliente": { title: [{ text: { content: "Novo lead" } }] },
-        Telefone: { rich_text: [{ text: { content: phone } }] },
-        Status: { select: { name: "Novo" } },
-        "Última Mensagem": { rich_text: [{ text: { content: lastMessage } }] },
-        "Última Resposta": { rich_text: [{ text: { content: lastReply } }] },
-      },
-    }),
-  });
-
-  const data = await resp.json();
-  if (!resp.ok) console.error("Notion create erro:", resp.status, data);
-}
-
-async function notionUpdate(pageId, { lastMessage, lastReply }) {
-  const resp = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-    method: "PATCH",
-    headers: notionHeaders(),
-    body: JSON.stringify({
-      properties: {
-        "Última Mensagem": { rich_text: [{ text: { content: lastMessage } }] },
-        "Última Resposta": { rich_text: [{ text: { content: lastReply } }] },
-      },
-    }),
-  });
-
-  const data = await resp.json();
-  if (!resp.ok) console.error("Notion update erro:", resp.status, data);
-}
-
-function notionHeaders() {
-  return {
-    Authorization: `Bearer ${NOTION_TOKEN}`,
-    "Content-Type": "application/json",
-    "Notion-Version": "2022-06-28",
-  };
-}
-
-app.get("/", (_, res) => res.status(200).send("OK"));
-
-app.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
+function send(to, body) {
+return fetch(`https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`, {
+method: "POST",
+headers: {
+Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+"Content-Type": "application/json",
+},
+body: JSON.stringify({
+messaging_product: "whatsapp",
+to,
+type: "text",
+text: { body },
+}),
 });
+}
+
+app.listen(PORT, () =>
+console.log(`Servidor rodando na porta ${PORT}`)
+);
