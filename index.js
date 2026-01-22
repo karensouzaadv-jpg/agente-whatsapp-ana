@@ -1,8 +1,18 @@
+import express from "express";
+import fetch from "node-fetch";
+
+const app = express();
+app.use(express.json());
+
+/**
+ * ===============================
+ * ENV (aceita nomes alternativos do Render)
+ * ===============================
+ */
 const VERIFY_TOKEN =
   process.env.VERIFY_TOKEN || process.env.WHATSAPP_VERIFY_TOKEN;
 
-const WHATSAPP_TOKEN =
-  process.env.WHATSAPP_TOKEN;
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 
 const PHONE_NUMBER_ID =
   process.env.PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID;
@@ -15,59 +25,74 @@ if (!VERIFY_TOKEN || !WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
     has_WHATSAPP_TOKEN: !!WHATSAPP_TOKEN,
     has_PHONE_NUMBER_ID: !!PHONE_NUMBER_ID,
   });
+} else {
+  console.log("✅ ENV OK:", {
+    has_VERIFY_TOKEN: true,
+    has_WHATSAPP_TOKEN: true,
+    has_PHONE_NUMBER_ID: true,
+    PORT,
+  });
 }
 
-
-/* ===============================
-ROTA RAIZ (EVITA 404 NO RENDER)
-================================ */
-app.get("/", (req, res) => {
-  res.status(200).send("OK - webhook online");
-});
-
-/* ===============================
-SESSÕES EM MEMÓRIA
-================================ */
+/**
+ * ===============================
+ * SESSÕES EM MEMÓRIA
+ * ===============================
+ */
 const sessions = new Map();
 
-/* ===============================
-FUNÇÃO DE ESPERA
-================================ */
+/**
+ * ===============================
+ * FUNÇÃO DE ESPERA
+ * ===============================
+ */
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/* ===============================
-VERIFICAÇÃO WEBHOOK
-================================ */
+/**
+ * ===============================
+ * HEALTHCHECK (Render chama GET /)
+ * ===============================
+ */
+app.get("/", (req, res) => {
+  res.status(200).send("OK - agente-whatsapp-ana");
+});
+
+/**
+ * ===============================
+ * VERIFICAÇÃO WEBHOOK (Meta chama GET /webhook)
+ * ===============================
+ */
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-
-  console.log("🔎 GET /webhook (verificação)", { mode, token_ok: token === VERIFY_TOKEN });
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
     console.log("✅ Webhook verificado com sucesso");
     return res.status(200).send(challenge);
   }
 
-  console.log("❌ Falha na verificação do webhook");
+  console.log("❌ Falha na verificação do webhook", { mode, token });
   return res.sendStatus(403);
 });
 
-/* ===============================
-RECEBIMENTO DE MENSAGENS
-================================ */
+/**
+ * ===============================
+ * RECEBIMENTO DE MENSAGENS (Meta chama POST /webhook)
+ * ===============================
+ */
 app.post("/webhook", async (req, res) => {
-  // Responde 200 rápido para a Meta
+  // responda 200 rápido pra Meta
   res.sendStatus(200);
 
   try {
-    console.log("📩 POST /webhook recebido:");
-    console.dir(req.body, { depth: null });
+    console.log("📩 POST /webhook recebido");
+    // opcional: descomente se quiser ver o payload completo
+    // console.dir(req.body, { depth: null });
 
     const msg = extractMessage(req.body);
     if (!msg) {
-      console.log("ℹ️ Nenhuma mensagem de texto encontrada (ignorando).");
+      console.log("ℹ️ Nenhuma mensagem de texto encontrada no payload");
       return;
     }
 
@@ -75,11 +100,14 @@ app.post("/webhook", async (req, res) => {
     const lower = text.toLowerCase();
     const session = sessions.get(from) || {};
 
-    console.log("👤 Mensagem de:", from, "| Texto:", text, "| Step atual:", session.step || "(novo)");
+    console.log("👤 Mensagem:", { from, text });
 
     /* ===== ABERTURA ===== */
     if (!session.step) {
-      await send(from, "Olá. Agradecemos seu contato. Para iniciar seu atendimento, farei uma pergunta.");
+      await send(
+        from,
+        "Olá. Agradecemos seu contato. Para iniciar seu atendimento, farei uma pergunta."
+      );
       await send(
         from,
         "Para qual área você precisa de atendimento agora?\n\n" +
@@ -101,6 +129,7 @@ app.post("/webhook", async (req, res) => {
           "Para eu te orientar da forma mais adequada, me diga: a prisão aconteceu HOJE ou a pessoa JÁ ESTAVA PRESA?"
         );
         session.step = "prison_status";
+        sessions.set(from, session);
         return;
       }
 
@@ -109,6 +138,7 @@ app.post("/webhook", async (req, res) => {
         from,
         "Antes de seguirmos, preciso confirmar uma informação para organizar corretamente o atendimento: este caso já possui advogado(a) constituído(a) atualmente?"
       );
+      sessions.set(from, session);
       return;
     }
 
@@ -154,7 +184,10 @@ app.post("/webhook", async (req, res) => {
     if (session.step === "call_permission") {
       if (lower.includes("sim")) {
         await wait(30000);
-        await send(from, "Tentei te ligar e a ligação não completou. Pode tentar me ligar aqui pelo WhatsApp agora?");
+        await send(
+          from,
+          "Tentei te ligar e a ligação não completou. Pode tentar me ligar aqui pelo WhatsApp agora?"
+        );
         sessions.delete(from);
         return;
       }
@@ -175,7 +208,10 @@ app.post("/webhook", async (req, res) => {
       }
 
       session.step = "lawyer_switch";
-      await send(from, "Certo. Você está buscando uma troca de advogado ou apenas uma orientação pontual?");
+      await send(
+        from,
+        "Certo. Você está buscando uma troca de advogado ou apenas uma orientação pontual?"
+      );
       sessions.set(from, session);
       return;
     }
@@ -209,7 +245,10 @@ app.post("/webhook", async (req, res) => {
       const hour = new Date().getHours();
 
       if (hour >= 8 && hour <= 19) {
-        await send(from, "Estou finalizando um atendimento agora. Assim que concluir, retorno por ligação para conversarmos, tudo bem?");
+        await send(
+          from,
+          "Estou finalizando um atendimento agora. Assim que concluir, retorno por ligação para conversarmos, tudo bem?"
+        );
       } else {
         await send(
           from,
@@ -220,14 +259,16 @@ app.post("/webhook", async (req, res) => {
       sessions.delete(from);
       return;
     }
-  } catch (e) {
-    console.error("🔥 Erro no POST /webhook:", e?.message);
+  } catch (err) {
+    console.log("❌ Erro no webhook:", err?.message || err);
   }
 });
 
-/* ===============================
-FUNÇÕES AUXILIARES
-================================ */
+/**
+ * ===============================
+ * FUNÇÕES AUXILIARES
+ * ===============================
+ */
 function extractMessage(body) {
   const msg = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
   if (!msg?.text?.body) return null;
@@ -266,12 +307,12 @@ async function send(to, body) {
   const data = await resp.json().catch(() => ({}));
 
   if (!resp.ok) {
-    console.error("❌ ERRO ao enviar WhatsApp:", resp.status, data);
+    console.log("❌ Erro ao enviar mensagem:", resp.status, data);
   } else {
-    console.log("✅ Mensagem enviada para", to, "| id:", data?.messages?.[0]?.id);
+    console.log("✅ Mensagem enviada:", to);
   }
 
-  return { ok: resp.ok, status: resp.status, data };
+  return { status: resp.status, data };
 }
 
 app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
