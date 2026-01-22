@@ -1,15 +1,22 @@
-import express from "express";
-import fetch from "node-fetch";
+const VERIFY_TOKEN =
+  process.env.VERIFY_TOKEN || process.env.WHATSAPP_VERIFY_TOKEN;
 
-const app = express();
-app.use(express.json());
+const WHATSAPP_TOKEN =
+  process.env.WHATSAPP_TOKEN;
 
-const {
-  VERIFY_TOKEN,
-  WHATSAPP_TOKEN,
-  PHONE_NUMBER_ID,
-  PORT = 10000,
-} = process.env;
+const PHONE_NUMBER_ID =
+  process.env.PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID;
+
+const PORT = process.env.PORT || 10000;
+
+if (!VERIFY_TOKEN || !WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
+  console.log("❌ Faltando ENV:", {
+    has_VERIFY_TOKEN: !!VERIFY_TOKEN,
+    has_WHATSAPP_TOKEN: !!WHATSAPP_TOKEN,
+    has_PHONE_NUMBER_ID: !!PHONE_NUMBER_ID,
+  });
+}
+
 
 /* ===============================
 ROTA RAIZ (EVITA 404 NO RENDER)
