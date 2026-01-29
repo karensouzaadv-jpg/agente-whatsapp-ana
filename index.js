@@ -6,10 +6,10 @@ app.use(express.json());
 
 /**
  * ===============================
- * ENV (aceita nomes alternativos do Render)
+ * ENV (aceita nomes alternativos)
  * ===============================
  */
-const VERIFY_TOKEN =
+const VERIFY_TOKEN_RAW =
   process.env.VERIFY_TOKEN || process.env.WHATSAPP_VERIFY_TOKEN;
 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
@@ -18,6 +18,9 @@ const PHONE_NUMBER_ID =
   process.env.PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID;
 
 const PORT = process.env.PORT || 10000;
+
+// Normaliza (remove espaços invisíveis)
+const VERIFY_TOKEN = (VERIFY_TOKEN_RAW || "").trim();
 
 if (!VERIFY_TOKEN || !WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
   console.log("❌ Faltando ENV:", {
@@ -61,18 +64,33 @@ app.get("/", (req, res) => {
  * ===============================
  * VERIFICAÇÃO WEBHOOK (Meta chama GET /webhook)
  * ===============================
+ *
+ * A Meta envia:
+ *  GET /webhook?hub.mode=subscribe&hub.verify_token=XYZ&hub.challenge=123
+ * Você DEVE responder "123" (texto puro) com 200 se o token for igual.
  */
 app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
+  const mode = (req.query["hub.mode"] || "").toString().trim();
+  const token = (req.query["hub.verify_token"] || "").toString().trim();
+  const challenge = (req.query["hub.challenge"] || "").toString();
+
+  // Log seguro (não expõe o token inteiro)
+  console.log("🔎 Webhook verify attempt:", {
+    mode,
+    tokenLen: token.length,
+    expectedLen: VERIFY_TOKEN.length,
+    tokenMatches: token === VERIFY_TOKEN,
+  });
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
     console.log("✅ Webhook verificado com sucesso");
     return res.status(200).send(challenge);
   }
 
-  console.log("❌ Falha na verificação do webhook", { mode, token });
+  console.log("❌ Falha na verificação do webhook", {
+    mode,
+    tokenLen: token.length,
+  });
   return res.sendStatus(403);
 });
 
@@ -87,6 +105,7 @@ app.post("/webhook", async (req, res) => {
 
   try {
     console.log("📩 POST /webhook recebido");
+
     // opcional: descomente se quiser ver o payload completo
     // console.dir(req.body, { depth: null });
 
